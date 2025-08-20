@@ -80,6 +80,10 @@ func main() {
 			log.Println("done shutdown")
 			os.Exit(0)
 		case chat := <-osuClient.Read:
+			if len(chat) > 0 && chat[0] == '-' {
+				// stop discord from thinking it's a list item
+				chat = "\\" + chat
+			}
 			dg.ChannelMessageSend(discordWatchChannel, chat)
 		case chat := <-readDiscord:
 			osuClient.Send(chat)
