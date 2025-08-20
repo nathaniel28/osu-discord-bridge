@@ -8,6 +8,15 @@ import (
 	"sync"
 )
 
+const (
+	codeGetterEscaped = "http%3A%2F%2Flocalhost%3A7538" // must be escaped
+	codeGetterAddr = "localhost:7538" // should match codeGetterEscaped
+
+	// should true for when you don't use localhost
+	// checks ./cert.pem and ./key.pem if true
+	useTLS = false
+)
+
 type handler struct{
 	server *http.Server
 	code   chan string
@@ -46,15 +55,19 @@ type messageEvent struct {
 
 // thanks peppy for this nonsense I need to use to get the code
 func osuAuthorize() (token token, err error) {
-	fmt.Println("https://osu.ppy.sh/oauth/authorize?client_id=" + oauth2ID + "&redirect_uri=http%3A%2F%2Flocalhost%3A7538&response_type=code&scope=chat.read+chat.write")
+	fmt.Println("https://osu.ppy.sh/oauth/authorize?client_id=" + oauth2ID + "&redirect_uri=" + codeGetterEscaped + "&response_type=code&scope=chat.read+chat.write")
 
-	server := http.Server{Addr: "localhost:7538"}
+	server := http.Server{Addr: codeGetterAddr}
 	handler := handler{
 		server: &server,
 		code: make(chan string, 1),
 	}
 	server.Handler = handler
-	err = server.ListenAndServe()
+	if useTLS {
+		err = server.ListenAndServeTLS("cert.pem", "key.pem")
+	} else {
+		err = server.ListenAndServe()
+	}
 	if err != http.ErrServerClosed {
 		return
 	}
@@ -69,7 +82,7 @@ func osuAuthorize() (token token, err error) {
 	body.WriteString(oauth2Secret)
 	body.WriteString("&code=")
 	body.WriteString(code)
-	body.WriteString("&grant_type=authorization_code&redirect_uri=http%3A%2F%2Flocalhost%3A7538")
+	body.WriteString("&grant_type=authorization_code&redirect_uri=" + codeGetterEscaped)
 	var getToken *http.Request
 	getToken, err = http.NewRequest("POST", "https://osu.ppy.sh/oauth/token", &body)
 	if err != nil {
