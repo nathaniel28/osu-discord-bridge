@@ -43,7 +43,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	readDiscord := make(chan string, 16)
+	readDiscord := make(chan string, 32)
 	dg.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
 		if m.Author.ID == s.State.User.ID || m.ChannelID != discordWatchChannel {
 			return

@@ -14,26 +14,6 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// TODO, perhaps
-/*
-// I though about having one channel for both messages and errors, but
-// defining a struct to contain a string and an error or using anys seemed worse
-type Messenger interface {
-	// Deliver a message. Send must not block.
-	// Must only be used from one thread.
-	Send(string)
-
-	// Block until a message is ready or an error is had
-	ReceiveChan() <-chan string
-
-	// Detect fatal errors
-	ErrorChan() <-chan error
-
-	// Close the connection to the remote resource
-	Close() error
-}
-*/
-
 type OsuClient struct {
 	http      http.Client
 	websocket *websocket.Conn
@@ -82,8 +62,28 @@ func (c *OsuClient) keepaliveLoop() {
 	}
 }
 
+// NOTE: osu! says 10 messages/5 seconds for pms, #multiplayer, and #spectator,
+// but we are active in none of those, so without knowledge of the real rate
+// limit I've settled on 25 messages/10 seconds and hopefully that's close...
+// NOTE: Only two parts make continuous requests to the osu!api, this one and
+// the keepalive. This part is the only one partially controlled by users, so
+// I'm only rate limiting this one (why would you rate limit a keepalive anyway)
 func (c *OsuClient) writeLoop() {
+	var sentThisCycle int
+	var cycleEnd time.Time
 	for {
+		// yes, before actually reading c.Write
+		// it's less accurate but the channel can act as a buffer
+		// with no extra support
+		now := time.Now()
+		if now.After(cycleEnd) {
+			cycleEnd = now.Add(10 * time.Second)
+			sentThisCycle = 1
+		} else if sentThisCycle >= 25 {
+			time.Sleep(cycleEnd.Sub(now))
+		} else {
+			sentThisCycle++
+		}
 		msg, ok := <-c.Write
 		if !ok {
 			return
@@ -220,11 +220,11 @@ func (c *OsuClient) Send(msg string) {
 }
 
 func (c *OsuClient) Close() {
-	//close(c.Read)
-	//close(c.Write)
+	close(c.Read)
+	close(c.Write)
 	c.websocket.Close()
 	c.stopKeepalive <- struct{}{}
-	//close(c.stopKeepalive)
+	close(c.stopKeepalive)
 }
 
 func expect[T comparable](dec *json.Decoder, t T) bool {
