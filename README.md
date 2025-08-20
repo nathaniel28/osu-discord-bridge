@@ -9,6 +9,7 @@ Before compilation, you will need:
     * `oauth2secret`: for your osu! oauth application client secret
     * `oauth2id`: for your osu! oauth application ID
     * `discordtoken`: for your Discord bot token
+* to make sure those files don't have trailing newlines; a lot of text editors add them; try `echo -n "something" > filename`
 
 #### compilation
 
