@@ -13,9 +13,7 @@ Before compilation, you will need:
 
 ### compilation
 
-On the first time, run `go mod tidy` to fetch dependencies.
-
-To compile, run `go build`.
+To compile, run `go build`; this will automatically fetch dependencies you don't have.
 
 ### execution
 
