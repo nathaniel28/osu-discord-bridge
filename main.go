@@ -17,6 +17,9 @@ const (
 	osuWatchChannel = 58277602 // HML
 	//discordWatchChannel = "1130978005448142879" // priv
 	discordWatchChannel = "1407449989969477742" // HML:relay
+
+	logPath = "./log"
+	logSize = 1048576
 )
 
 //go:embed oauth2id
@@ -27,6 +30,12 @@ var oauth2Secret string
 var discordToken string
 
 func main() {
+	var rlog CircularLog
+	if err := rlog.Open(logPath, logSize); err != nil {
+		log.Fatal("failed to create log")
+	}
+	log.SetOutput(&rlog)
+
 	// osu setup
 	token, err := osuAuthorize()
 	if err != nil {
