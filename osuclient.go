@@ -51,7 +51,7 @@ func (c *OsuClient) keepaliveLoop() {
 			go notify(nchan)
 			resp, err := c.http.Do(c.keepalive)
 			if err != nil {
-				log.Println("dokeepalive:", err)
+				log.Println("dokeepalive:", err.Error())
 				return
 			}
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -98,7 +98,7 @@ func (c *OsuClient) writeLoop() {
 		req.Header = c.headers
 		resp, err := c.http.Do(req)
 		if err != nil {
-			log.Println("send message request:", err)
+			log.Println("send message request:", err.Error())
 			continue
 		}
 		resp.Body.Close()
@@ -111,11 +111,27 @@ func (c *OsuClient) watchOsu() {
 		_, raw, err := c.websocket.ReadMessage()
 		if err != nil {
 			if !errors.Is(err, net.ErrClosed) {
-				if err = c.recoverWebsocket(); err == nil {
-					log.Println("recovered from websocket error")
+				err2 := c.recoverWebsocket()
+				if err2 == nil {
+					log.Println("recovered from websocket error:", err.Error())
 					continue
 				}
-				// TODO: that's fatal
+				msg := fmt.Sprintf("osu watch failed with %s; recovery failed with %s; final recovery in 5 minutes", err.Error(), err2.Error())
+				log.Println(msg)
+				c.Read <- msg
+				time.Sleep(5 * time.Minute)
+				err = c.recoverWebsocket()
+				if err == nil {
+					msg = "osu watch back online"
+					log.Println(msg)
+					c.Read <- msg
+					continue
+				}
+				msg = fmt.Sprintf("failed last recovery attempt: %s", err.Error())
+				log.Println(msg)
+				c.Read <- msg
+				c.Read <- "Messages from osu! will no longer be sent here. Messages sent here will still be sent to osu! (disable the bot to prevent this)."
+				// TODO: that's fatal, report to main
 			}
 			return
 		}
