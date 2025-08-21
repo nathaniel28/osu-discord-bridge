@@ -57,7 +57,11 @@ func main() {
 		if m.Author.ID == s.State.User.ID || m.ChannelID != discordWatchChannel {
 			return
 		}
-		readDiscord <- fmt.Sprintf("%s: %s", m.Author.Username, m.Content)
+		name := m.Author.GlobalName
+		if len(name) == 0 {
+			name = m.Author.Username
+		}
+		readDiscord <- fmt.Sprintf("%s: %s", name, m.Content)
 	})
 	dg.Identify.Intents = discordgo.IntentsGuildMessages
 	err = dg.Open()
