@@ -111,26 +111,22 @@ func (c *OsuClient) watchOsu() {
 		_, raw, err := c.websocket.ReadMessage()
 		if err != nil {
 			if !errors.Is(err, net.ErrClosed) {
-				err2 := c.recoverWebsocket()
+				err2 := c.recoverWebsocket(true)
 				if err2 == nil {
 					log.Println("recovered from websocket error:", err.Error())
 					continue
 				}
-				msg := fmt.Sprintf("osu watch failed with %s; recovery failed with %s; final recovery in 5 minutes", err.Error(), err2.Error())
-				log.Println(msg)
-				c.Read <- msg
+				log.Printf("osu reader failed: %s; initial recovery failed: %s", err.Error(), err2.Error())
+				c.Read <- "osu reader failed, will attempt recovery in 5 minutes"
 				time.Sleep(5 * time.Minute)
-				err = c.recoverWebsocket()
+				err = c.recoverWebsocket(false)
 				if err == nil {
-					msg = "osu watch back online"
-					log.Println(msg)
-					c.Read <- msg
+					log.Println("osu reader back online")
+					c.Read <- "osu reader back online"
 					continue
 				}
-				msg = fmt.Sprintf("failed last recovery attempt: %s", err.Error())
-				log.Println(msg)
-				c.Read <- msg
-				c.Read <- "Messages from osu! will no longer be sent here. Messages sent here will still be sent to osu! (disable the bot to prevent this)."
+				log.Println("failed last recovery attempt: %s", err.Error())
+				c.Read <- "Final recovery failed. Messages from osu! will not be sent to this channel until the operator intervenes. Messages sent here will still be sent to osu! (disable the bot to prevent this)."
 				// TODO: that's fatal, report to main
 			}
 			return
@@ -173,13 +169,15 @@ func (c *OsuClient) watchOsu() {
 	}
 }
 
-var TooQuickRecoveries = errors.New("recovories occurred at a rapid interval")
-func (c *OsuClient) recoverWebsocket() error {
-	now := time.Now()
-	if now.Sub(c.lastRecovery) < c.soonestRetry {
-		return TooQuickRecoveries
+var TooQuickRecoveries = errors.New("recovories occurred too rapidly")
+func (c *OsuClient) recoverWebsocket(checkLastAttempt bool) error {
+	if checkLastAttempt {
+		now := time.Now()
+		if now.Sub(c.lastRecovery) < c.soonestRetry {
+			return TooQuickRecoveries
+		}
+		c.lastRecovery = now
 	}
-	c.lastRecovery = now
 
 	var err error
 	c.websocket, _, err = websocket.DefaultDialer.Dial("wss://notify.ppy.sh", c.headers)
@@ -219,7 +217,7 @@ func NewOsuClient(uid, chid int, authcode string, soonestRecoveryRetry time.Dura
 }
 
 func (c *OsuClient) Open() error {
-	if err := c.recoverWebsocket(); err != nil {
+	if err := c.recoverWebsocket(false); err != nil {
 		return err
 	}
 	go c.writeLoop()
