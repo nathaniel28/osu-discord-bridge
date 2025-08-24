@@ -6,7 +6,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -42,7 +41,7 @@ func main() {
 		log.Fatal("acquiring code:", err)
 	}
 
-	osuClient, err := NewOsuClient(osuBotID, osuWatchChannel, token.Token, 3 * time.Minute)
+	osuClient, err := NewOsuClient(osuBotID, osuWatchChannel, token.Token)
 	if err != nil {
 		log.Fatal("osu client struct creation:", err)
 	}
@@ -76,20 +75,29 @@ func main() {
 		log.Fatal("OsuClient.Open():", err)
 	}
 
+	shutdown := func() {
+		osuClient.Close()
+		dg.Close()
+		log.Println("done shutdown")
+		os.Exit(0)
+	}
 	for {
 		select {
 		case <-sigint:
-			osuClient.Close()
-			dg.Close()
-			log.Println("done shutdown")
-			os.Exit(0)
-		case chat := <-osuClient.Read:
+			shutdown()
+		case chat, ok := <-osuClient.Read:
+			if !ok {
+				shutdown()
+			}
 			if len(chat) > 0 && chat[0] == '-' {
 				// stop discord from thinking it's a list item
 				chat = "\\" + chat
 			}
 			dg.ChannelMessageSend(discordWatchChannel, chat)
-		case chat := <-readDiscord:
+		case chat, ok := <-readDiscord:
+			if !ok {
+				shutdown()
+			}
 			osuClient.Send(chat)
 		}
 	}
