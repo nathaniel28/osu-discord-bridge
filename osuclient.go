@@ -197,7 +197,9 @@ mainLoop:
 // or you have concurrent writes to the *websocket.Conn
 // NOTE: make a lock if writes happen from somewhere else
 func (c *OsuClient) recoverWebsocket() error {
-	c.websocket.Close()
+	if c.websocket != nil {
+		c.websocket.Close()
+	}
 	var err error
 	c.websocket, _, err = websocket.DefaultDialer.Dial("wss://notify.ppy.sh", c.headers)
 	if err != nil {
