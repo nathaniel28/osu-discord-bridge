@@ -103,7 +103,7 @@ func (c *OsuClient) keepaliveLoop(cancel chan struct{}) {
 }
 
 func (c *OsuClient) watchOsu() {
-	cancelKeepalive := make(chan struct{}, 1)
+	cancelKeepalive := make(chan struct{})
 	go c.keepaliveLoop(cancelKeepalive)
 	var msg messageEvent
 	var lastRecovery time.Time
@@ -113,11 +113,12 @@ mainLoop:
 		if err != nil {
 			cancelKeepalive <- struct{}{}
 			if !errors.Is(err, net.ErrClosed) {
-				now := time.Now()
-				diff := now.Sub(lastRecovery)
-				// TODO: create constant for recovery cooldown
-				if diff < 30 * time.Second {
-					time.Sleep(diff)
+				elapsed := time.Since(lastRecovery)
+				// TODO: move cooldown constant somewhere
+				// more obvious
+				const cooldown = 30 * time.Second
+				if cooldown > elapsed {
+					time.Sleep(cooldown - elapsed)
 				}
 				err2 := c.recoverWebsocket()
 				if err2 == nil {
@@ -156,11 +157,28 @@ mainLoop:
 		}
 		// NOTE: we rely on the event field being specified first
 		fieldName, ok := expectAny[string](dec)
-		if !ok || fieldName != "event" {
+		if !ok {
+			log.Println("badly formatted json:")
+			logRemainder(dec)
+			continue
+		}
+		if fieldName == "error" {
+			errMsg, ok := expectAny[string](dec)
+			if !ok {
+				log.Println("osu wanted to report an error but didn't do so properly")
+				logRemainder(dec)
+			} else {
+				log.Println("osu reported by websocket: ", errMsg)
+			}
+			// odds are websocket.Conn fails next loop
+			continue
+		}
+		if fieldName != "event" {
 			log.Printf("got unexpected json:\n{\"%s\"", fieldName)
 			logRemainder(dec)
 			continue
 		}
+
 		evType, ok := expectAny[string](dec)
 		if !ok {
 			log.Println("very odd json: ")
