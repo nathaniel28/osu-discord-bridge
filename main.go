@@ -27,6 +27,10 @@ var oauth2ID string
 var oauth2Secret string
 //go:embed discordtoken
 var discordToken string
+//go:embed webhookid
+var webhookID string
+//go:embed webhooktoken
+var webhookToken string
 
 func main() {
 	var rlog CircularLog
@@ -49,11 +53,11 @@ func main() {
 	// discord setup
 	dg, err := discordgo.New("Bot " + discordToken)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("discordgo.New():", err)
 	}
 	readDiscord := make(chan string, 32)
 	dg.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
-		if m.Author.ID == s.State.User.ID || m.ChannelID != discordWatchChannel {
+		if m.Author.ID == s.State.User.ID || m.ChannelID != discordWatchChannel || m.WebhookID == webhookID {
 			return
 		}
 		name := m.Author.GlobalName
@@ -65,7 +69,7 @@ func main() {
 	dg.Identify.Intents = discordgo.IntentsGuildMessages
 	err = dg.Open()
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("discordgo:Session.Open():", err)
 	}
 
 	sigint := make(chan os.Signal, 1)
@@ -89,11 +93,14 @@ func main() {
 			if !ok {
 				shutdown()
 			}
-			if len(chat) > 0 && chat[0] == '-' {
-				// stop discord from thinking it's a list item
-				chat = "\\" + chat
+			_, err := dg.WebhookExecute(webhookID, webhookToken, false, &discordgo.WebhookParams{
+				Content: chat.Content,
+				Username: chat.Author,
+				AvatarURL: chat.AvatarURL,
+			})
+			if err != nil {
+				log.Println("discordgo:Session.WebhookExecute():", err)
 			}
-			dg.ChannelMessageSend(discordWatchChannel, chat)
 		case chat, ok := <-readDiscord:
 			if !ok {
 				shutdown()

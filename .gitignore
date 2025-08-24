@@ -1,4 +1,6 @@
 ./oauth2id
 ./oauth2secret
 ./discordtoken
+./webhookid
+./webhooktoken
 ./*.swp

@@ -14,21 +14,32 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-type message struct {
+// tagged struct for reading part of the json osu sends over the websocket
+type osuMessage struct {
 	Content   string `json:"content"`
 	ID        int    `json:"message_id"`
 	ChannelID int    `json:"channel_id"`
 	Action    bool   `json:"is_action"`
 }
 
-type user struct {
-	Name string `json:"username"`
-	ID   int    `json:"id"`
+// ditto to comment on osuMessage
+type osuUser struct {
+	Name      string `json:"username"`
+	AvatarURL string `json:"avatar_url"`
+	ID        int    `json:"id"`
 }
 
+// all the parts of the json this program cares about
 type messageEvent struct {
-	Messages []message `json:"messages"`
-	Users    []user    `json:"users"`
+	Messages []osuMessage `json:"messages"`
+	Users    []osuUser    `json:"users"`
+}
+
+// what we pass to the OsuClient.Read channel
+type Message struct {
+	Content   string
+	Author    string
+	AvatarURL string
 }
 
 type OsuClient struct {
@@ -45,7 +56,7 @@ type OsuClient struct {
 
 	chatEndpoint string
 
-	Read  chan string // read messages from osu chat
+	Read  chan Message // read messages from osu chat
 	Write chan string // consider Send() instead; this is not for messages
 }
 
@@ -119,6 +130,7 @@ func (c *OsuClient) keepaliveLoop(cancel chan struct{}) {
 	}
 }
 
+// TODO: clean up function; 7 levels of indentation is crazy
 func (c *OsuClient) watchOsu() {
 	cancelKeepalive := make(chan struct{})
 	go c.keepaliveLoop(cancelKeepalive)
@@ -133,7 +145,7 @@ mainLoop:
 				elapsed := time.Since(lastRecovery)
 				// TODO: move cooldown constant somewhere
 				// more obvious
-				const cooldown = 30 * time.Second
+				const cooldown = 10 * time.Second
 				if cooldown > elapsed {
 					time.Sleep(cooldown - elapsed)
 				}
@@ -145,17 +157,26 @@ mainLoop:
 					continue
 				}
 				log.Printf("osu reader failed: %s; initial recovery failed: %s", err.Error(), err2.Error())
-				c.Read <- "osu reader failed, attempting to recover"
-				wait := 10 * time.Second
+				c.Read <- Message{
+					Content: "osu reader failed, attempting to recover",
+					Author: "(debug)",
+				}
+				wait := cooldown
 				for i := 0; i < 12; i++ {
 					if wait > 1 * time.Minute {
-						c.Read <- fmt.Sprintf("sleeping for %v before attempting recovery", wait)
+						c.Read <- Message{
+							Content: fmt.Sprintf("sleeping for %v before attempting recovery", wait),
+							Author: "(debug)",
+						}
 					}
 					time.Sleep(wait)
 					err = c.recoverWebsocket()
 					if err == nil {
 						lastRecovery = time.Now()
-						c.Read <- "recovered successfully"
+						c.Read <- Message{
+							Content: "recovered successfully",
+							Author: "(debug)",
+						}
 						go c.keepaliveLoop(cancelKeepalive)
 						continue mainLoop
 					}
@@ -218,7 +239,11 @@ mainLoop:
 				if msg.Users[i].ID == c.botUserID || msg.Messages[i].ChannelID != c.watchChannelID {
 					continue
 				}
-				c.Read <- fmt.Sprintf("%s: %s", msg.Users[i].Name, msg.Messages[i].Content)
+				c.Read <- Message{
+					Content: msg.Messages[i].Content,
+					Author: msg.Users[i].Name,
+					AvatarURL: msg.Users[i].AvatarURL,
+				}
 			}
 		default:
 			log.Printf("skipping %s\n", evType)
@@ -253,7 +278,7 @@ func NewOsuClient(uid, chid int, authcode string) (*OsuClient, error) {
 		botUserID: uid,
 		watchChannelID: chid,
 		chatEndpoint: fmt.Sprintf("https://osu.ppy.sh/api/v2/chat/channels/%v/messages", chid),
-		Read: make(chan string, 32),
+		Read: make(chan Message, 32),
 		Write: make(chan string, 32),
 	}
 
