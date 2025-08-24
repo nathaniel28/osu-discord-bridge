@@ -11,10 +11,9 @@ import (
 const (
 	codeGetterEscaped = "http%3A%2F%2Flocalhost%3A7538" // must be escaped
 	codeGetterAddr = "localhost:7538" // should match codeGetterEscaped
-
-	// should true for when you don't use localhost
-	// checks ./cert.pem and ./key.pem if true
 	useTLS = false
+	// useTLS should true for when you don't use localhost
+	// checks ./cert.pem and ./key.pem if true
 )
 
 type handler struct{
@@ -34,23 +33,6 @@ type token struct {
 	Token   string `json:"access_token"`
 	Refresh string `json:"refresh_token"`
 	Expires int    `json:"expires_in"`
-}
-
-type message struct {
-	Content   string `json:"content"`
-	ID        int    `json:"message_id"`
-	ChannelID int    `json:"channel_id"`
-	Action    bool   `json:"is_action"`
-}
-
-type user struct {
-	Name string `json:"username"`
-	ID   int    `json:"id"`
-}
-
-type messageEvent struct {
-	Messages []message `json:"messages"`
-	Users    []user    `json:"users"`
 }
 
 // thanks peppy for this nonsense I need to use to get the code

@@ -14,6 +14,23 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+type message struct {
+	Content   string `json:"content"`
+	ID        int    `json:"message_id"`
+	ChannelID int    `json:"channel_id"`
+	Action    bool   `json:"is_action"`
+}
+
+type user struct {
+	Name string `json:"username"`
+	ID   int    `json:"id"`
+}
+
+type messageEvent struct {
+	Messages []message `json:"messages"`
+	Users    []user    `json:"users"`
+}
+
 type OsuClient struct {
 	http      http.Client
 	websocket *websocket.Conn
