@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -274,7 +275,7 @@ ready:
 		case "chat.message.new":
 			err = json.Unmarshal(ev.Data, &msg)
 			if err != nil {
-				log.Println(err)
+				log.Println("could not parse as message: ", err.Error())
 				continue
 			}
 			lo := min(len(msg.Messages), len(msg.Users))
@@ -330,12 +331,32 @@ func (c *OsuClient) Open() error {
 	return nil
 }
 
+func escape(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case '\n':
+			b.WriteString("\\n")
+		case '\r':
+			b.WriteString("\\r")
+		case '\t':
+			b.WriteString("\\t")
+		case '"', '\\':
+			b.WriteByte('\\')
+			fallthrough
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 func (c *OsuClient) Send(msg string) {
 	if len(c.Write) == cap(c.Write) {
 		log.Println("dropping message, can't keep up")
 		return
 	}
-	c.Write <- `{"message":"` + msg + `","is_action":false}`
+	c.Write <- `{"message":"` + escape(msg) + `","is_action":false}`
 }
 
 func (c *OsuClient) Close() {
