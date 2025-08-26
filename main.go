@@ -6,16 +6,15 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
 
 const (
 	osuBotID = 36497341
-	//osuWatchChannel = 58051697 // priv
-	osuWatchChannel = 58277602 // HML
-	//discordWatchChannel = "1130978005448142879" // priv
-	discordWatchChannel = "1407449989969477742" // HML:relay
+	osuWatchChannel = 58277602
+	discordWatchChannel = "1407449989969477742"
 
 	logPath = "./log"
 	logSize = 1048576
@@ -45,7 +44,7 @@ func main() {
 		log.Fatal("acquiring code:", err)
 	}
 
-	osuClient, err := NewOsuClient(osuBotID, osuWatchChannel, token.Token)
+	osuClient, err := NewOsuClient(osuBotID, osuWatchChannel, token.Token, 15 * time.Second)
 	if err != nil {
 		log.Fatal("osu client struct creation:", err)
 	}
@@ -93,6 +92,7 @@ func main() {
 			if !ok {
 				shutdown()
 			}
+			//*
 			_, err := dg.WebhookExecute(webhookID, webhookToken, false, &discordgo.WebhookParams{
 				Content: chat.Content,
 				Username: chat.Author,
@@ -101,6 +101,9 @@ func main() {
 			if err != nil {
 				log.Println("discordgo:Session.WebhookExecute():", err)
 			}
+			/*/
+			dg.ChannelMessageSend(discordWatchChannel, chat.Author + ": " + chat.Content)
+			//*/
 		case chat, ok := <-readDiscord:
 			if !ok {
 				shutdown()

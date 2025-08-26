@@ -5,7 +5,6 @@ import (
 	"errors"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -35,6 +34,12 @@ type messageEvent struct {
 	Users    []osuUser    `json:"users"`
 }
 
+type event struct {
+	Err       string          `json:"error"`
+	EventType string          `json:"event"`
+	Data      json.RawMessage `json:"data"`
+}
+
 // what we pass to the OsuClient.Read channel
 type Message struct {
 	Content   string
@@ -50,6 +55,11 @@ type OsuClient struct {
 	// watchOsu owns this request
 	// cannot be used from any other thread
 	keepalive *http.Request
+
+	// used in watchOsu
+	// cooldown used as is and as a start to exponential backoff
+	cooldown     time.Duration // should be set once during init
+	lastRecovery time.Time
 
 	botUserID      int // essentially who to ignore
 	watchChannelID int
@@ -106,7 +116,8 @@ func (c *OsuClient) writeLoop() {
 // managed by watchOsu; do not call elsewhere
 func (c *OsuClient) keepaliveLoop(cancel chan struct{}) {
 	notify := func(ch chan struct{}) {
-		time.Sleep(30 * time.Second)
+		// TODO: probably define the time somewhere more obvious
+		time.Sleep(90 * time.Second)
 		ch <- struct{}{}
 	}
 	nchan := make(chan struct{}, 1)
@@ -130,106 +141,138 @@ func (c *OsuClient) keepaliveLoop(cancel chan struct{}) {
 	}
 }
 
-// TODO: clean up function; 7 levels of indentation is crazy
+// can only be called by watchOsu; helper to watchOsu
+var unreadyConnection = errors.New("ready event was not the first received")
+func (c *OsuClient) initWebsocket() error {
+	if c.websocket != nil {
+		c.websocket.Close()
+	}
+	var err error
+	c.websocket, _, err = websocket.DefaultDialer.Dial("wss://notify.ppy.sh", c.headers)
+	if err != nil {
+		return err
+	}
+	err = c.websocket.WriteMessage(websocket.TextMessage, []byte(`{"event":"chat.start"}`))
+	if err != nil {
+		return err
+	}
+	_, raw, err := c.websocket.ReadMessage()
+	if err != nil {
+		return err
+	}
+	var ev event
+	err = json.Unmarshal(raw, &ev)
+	if err != nil {
+		return err
+	}
+	if ev.Err != "" {
+		return fmt.Errorf("error over osu websocket %v", ev.Err)
+	}
+	if ev.EventType != "connection.ready" {
+		return unreadyConnection
+	}
+	return nil
+}
+
+// helper to watchOsu
+var tooManyRetries = errors.New("after trying pretty hard to recover, it didn't work")
+func (c *OsuClient) tryRecovery() error {
+	defer func() {
+		c.lastRecovery = time.Now()
+	}()
+	elapsed := time.Since(c.lastRecovery)
+	if c.cooldown > elapsed {
+		time.Sleep(c.cooldown - elapsed)
+	}
+	err := c.initWebsocket()
+	if err == nil {
+		return nil
+	}
+	log.Printf("initial recovery failed: %s", err.Error())
+	c.Read <- Message{
+		Content: "osu reader failed, attempting to recover",
+		Author: "(debug)",
+	}
+	wait := c.cooldown
+	for i := 0; i < 12; i++ {
+		if wait > 90 * time.Second {
+			c.Read <- Message{
+				Content: fmt.Sprintf("sleeping for %v before attempting recovery", wait),
+				Author: "(debug)",
+			}
+		}
+		time.Sleep(wait)
+		err = c.initWebsocket()
+		if err == nil {
+			c.Read <- Message{
+				Content: "recovered successfully",
+				Author: "(debug)",
+			}
+			return nil
+		}
+		log.Println("failed recovery: ", err.Error())
+		wait *= 2
+	}
+	return tooManyRetries
+}
+
 func (c *OsuClient) watchOsu() {
+	for i := 0; i < 4; i++ {
+		err := c.initWebsocket()
+		if err == nil {
+			goto ready // sorry :P
+		}
+		log.Println("failed first websocket creation ", err.Error())
+		time.Sleep(c.cooldown)
+	}
+	// TODO: fatal
+	return
+ready:
 	cancelKeepalive := make(chan struct{})
 	go c.keepaliveLoop(cancelKeepalive)
 	var msg messageEvent
-	var lastRecovery time.Time
-mainLoop:
+	var ev event
+	log.Println("running watchOsu")
 	for {
 		_, raw, err := c.websocket.ReadMessage()
 		if err != nil {
 			cancelKeepalive <- struct{}{}
 			if !errors.Is(err, net.ErrClosed) {
-				elapsed := time.Since(lastRecovery)
-				// TODO: move cooldown constant somewhere
-				// more obvious
-				const cooldown = 10 * time.Second
-				if cooldown > elapsed {
-					time.Sleep(cooldown - elapsed)
-				}
-				err2 := c.recoverWebsocket()
-				if err2 == nil {
-					log.Println("recovered from websocket error:", err.Error())
-					lastRecovery = time.Now()
+				err = c.tryRecovery()
+				if err == nil {
+					log.Println("recovered from websocket error: ", err.Error())
 					go c.keepaliveLoop(cancelKeepalive)
 					continue
-				}
-				log.Printf("osu reader failed: %s; initial recovery failed: %s", err.Error(), err2.Error())
-				c.Read <- Message{
-					Content: "osu reader failed, attempting to recover",
-					Author: "(debug)",
-				}
-				wait := cooldown
-				for i := 0; i < 12; i++ {
-					if wait > 1 * time.Minute {
-						c.Read <- Message{
-							Content: fmt.Sprintf("sleeping for %v before attempting recovery", wait),
-							Author: "(debug)",
-						}
-					}
-					time.Sleep(wait)
-					err = c.recoverWebsocket()
-					if err == nil {
-						lastRecovery = time.Now()
-						c.Read <- Message{
-							Content: "recovered successfully",
-							Author: "(debug)",
-						}
-						go c.keepaliveLoop(cancelKeepalive)
-						continue mainLoop
-					}
-					log.Printf("failed recovery: %v", err.Error())
-					wait *= 2
 				}
 				// TODO: that's fatal, report to main
 			}
 			return
 		}
-		dec := json.NewDecoder(bytes.NewBuffer(raw))
-		if !expect[json.Delim](dec, '{') {
-			log.Println("not json object: ")
-			logRemainder(dec)
-			continue
-		}
-		// NOTE: we rely on the event field being specified first
-		fieldName, ok := expectAny[string](dec)
-		if !ok {
-			log.Println("badly formatted json:")
-			logRemainder(dec)
-			continue
-		}
-		if fieldName == "error" {
-			errMsg, ok := expectAny[string](dec)
-			if !ok {
-				log.Println("osu wanted to report an error but didn't do so properly")
-				logRemainder(dec)
-			} else {
-				log.Println("osu reported by websocket: ", errMsg)
-			}
-			// odds are websocket.Conn fails next loop
-			continue
-		}
-		if fieldName != "event" {
-			log.Printf("got unexpected json:\n{\"%s\"", fieldName)
-			logRemainder(dec)
-			continue
-		}
 
-		evType, ok := expectAny[string](dec)
-		if !ok {
-			log.Println("very odd json: ")
-			logRemainder(dec)
-			continue
+		err = json.Unmarshal(raw, &ev)
+		if err != nil {
+			log.Println("osu sent something strange and it could not be parsed: ", err)
+			cancelKeepalive <- struct{}{}
+			err = c.tryRecovery()
+			if err == nil {
+				continue
+			}
+			// TODO: fatal
+			return
 		}
-		if !expect[string](dec, "data") {
-			log.Printf("skipping dataless %s\n", evType)
-			continue
+		if ev.Err != "" {
+			log.Println("error while reading osu chat: ", ev.Err)
+			cancelKeepalive <- struct{}{}
+			err = c.tryRecovery()
+			if err == nil {
+				continue
+			}
+			// TODO: fatal
+			return
 		}
-		switch evType {
+		switch ev.EventType {
 		case "chat.message.new":
-			err = dec.Decode(&msg)
+			err = json.Unmarshal(ev.Data, &msg)
 			if err != nil {
 				log.Println(err)
 				continue
@@ -245,39 +288,25 @@ mainLoop:
 					AvatarURL: msg.Users[i].AvatarURL,
 				}
 			}
+		case "chat.channel.join":
+			log.Println("joined channel??")
+		case "chat.channel.part":
+			log.Println("left channel??")
 		default:
-			log.Printf("skipping %s\n", evType)
+			log.Printf("skipping unknown event type ", ev.EventType)
 		}
 	}
 	// dead code currently
 	cancelKeepalive <- struct{}{}
 }
 
-// can only be called when watchOsu is not running
-// or you have concurrent writes to the *websocket.Conn
-// NOTE: make a lock if writes happen from somewhere else
-func (c *OsuClient) recoverWebsocket() error {
-	if c.websocket != nil {
-		c.websocket.Close()
-	}
-	var err error
-	c.websocket, _, err = websocket.DefaultDialer.Dial("wss://notify.ppy.sh", c.headers)
-	if err != nil {
-		return err
-	}
-	err = c.websocket.WriteMessage(websocket.TextMessage, []byte(`{"event":"chat.start"}`))
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func NewOsuClient(uid, chid int, authcode string) (*OsuClient, error) {
+func NewOsuClient(uid, chid int, authcode string, retryCooldown time.Duration) (*OsuClient, error) {
 	client := OsuClient{
 		headers: make(http.Header),
 		botUserID: uid,
 		watchChannelID: chid,
 		chatEndpoint: fmt.Sprintf("https://osu.ppy.sh/api/v2/chat/channels/%v/messages", chid),
+		cooldown: retryCooldown,
 		Read: make(chan Message, 32),
 		Write: make(chan string, 32),
 	}
@@ -296,9 +325,6 @@ func NewOsuClient(uid, chid int, authcode string) (*OsuClient, error) {
 }
 
 func (c *OsuClient) Open() error {
-	if err := c.recoverWebsocket(); err != nil {
-		return err
-	}
 	go c.writeLoop()
 	go c.watchOsu()
 	return nil
@@ -316,28 +342,4 @@ func (c *OsuClient) Close() {
 	close(c.Read)
 	close(c.Write)
 	c.websocket.Close()
-}
-
-func expect[T comparable](dec *json.Decoder, t T) bool {
-	tok, err := dec.Token()
-	if err != nil {
-		return false
-	}
-	c, ok := tok.(T)
-	return ok && c == t
-}
-
-func expectAny[T any](dec *json.Decoder) (T, bool) {
-	tok, err := dec.Token()
-	if err != nil {
-		var zero T
-		return zero, false
-	}
-	c, ok := tok.(T)
-	return c, ok
-}
-
-func logRemainder(dec *json.Decoder) {
-	// hehe
-	io.Copy(log.Default().Writer(), io.MultiReader(dec.Buffered(), bytes.NewReader([]byte{'\n'})))
 }
