@@ -14,6 +14,11 @@ const (
 	useTLS = false
 	// useTLS should true for when you don't use localhost
 	// checks ./cert.pem and ./key.pem if true
+
+	// NON-LOCAL EXAMPLE:
+	//codeGetterEscaped = "https%3A%2F%2Fyourdomain.example.com%3A12345"
+	//codeGetterAddr = ":12345"
+	//useTLS = true
 )
 
 type handler struct{
