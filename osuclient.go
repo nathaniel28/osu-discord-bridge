@@ -211,7 +211,7 @@ func (c *OsuClient) tryRecovery() error {
 			}
 			return nil
 		}
-		log.Println("failed recovery: ", err.Error())
+		log.Println("failed recovery:", err.Error())
 		wait *= 2
 	}
 	return tooManyRetries
@@ -223,7 +223,7 @@ func (c *OsuClient) watchOsu() {
 		if err == nil {
 			goto ready // sorry :P
 		}
-		log.Println("failed first websocket creation ", err.Error())
+		log.Println("failed first websocket creation:", err.Error())
 		time.Sleep(c.cooldown)
 	}
 	// TODO: fatal
@@ -241,7 +241,7 @@ ready:
 			if !errors.Is(err, net.ErrClosed) {
 				err = c.tryRecovery()
 				if err == nil {
-					log.Println("recovered from websocket error: ", err.Error())
+					log.Println("recovered from websocket error:", err.Error())
 					go c.keepaliveLoop(cancelKeepalive)
 					continue
 				}
@@ -252,7 +252,7 @@ ready:
 
 		err = json.Unmarshal(raw, &ev)
 		if err != nil {
-			log.Println("osu sent something strange and it could not be parsed: ", err)
+			log.Println("osu sent something strange and it could not be parsed:", err.Error())
 			cancelKeepalive <- struct{}{}
 			err = c.tryRecovery()
 			if err == nil {
@@ -262,7 +262,7 @@ ready:
 			return
 		}
 		if ev.Err != "" {
-			log.Println("error while reading osu chat: ", ev.Err)
+			log.Println("error while reading osu chat:", ev.Err)
 			cancelKeepalive <- struct{}{}
 			err = c.tryRecovery()
 			if err == nil {
@@ -275,7 +275,7 @@ ready:
 		case "chat.message.new":
 			err = json.Unmarshal(ev.Data, &msg)
 			if err != nil {
-				log.Println("could not parse as message: ", err.Error())
+				log.Println("could not parse as message:", err.Error())
 				continue
 			}
 			lo := min(len(msg.Messages), len(msg.Users))
@@ -294,7 +294,7 @@ ready:
 		case "chat.channel.part":
 			log.Println("left channel??")
 		default:
-			log.Printf("skipping unknown event type ", ev.EventType)
+			log.Println("skipping unknown event type", ev.EventType)
 		}
 	}
 	// dead code currently
