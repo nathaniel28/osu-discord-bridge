@@ -239,8 +239,8 @@ ready:
 		if err != nil {
 			cancelKeepalive <- struct{}{}
 			if !errors.Is(err, net.ErrClosed) {
-				err = c.tryRecovery()
-				if err == nil {
+				err2 := c.tryRecovery()
+				if err2 == nil {
 					log.Println("recovered from websocket error:", err.Error())
 					go c.keepaliveLoop(cancelKeepalive)
 					continue
