@@ -84,6 +84,9 @@ func main() {
 		log.Println("done shutdown")
 		os.Exit(0)
 	}
+	pingPerms := discordgo.MessageAllowedMentions{
+		Parse: []discordgo.AllowedMentionType{discordgo.AllowedMentionTypeUsers},
+	}
 	for {
 		select {
 		case <-sigint:
@@ -92,18 +95,16 @@ func main() {
 			if !ok {
 				shutdown()
 			}
-			//*
 			_, err := dg.WebhookExecute(webhookID, webhookToken, false, &discordgo.WebhookParams{
 				Content: chat.Content,
 				Username: chat.Author,
 				AvatarURL: chat.AvatarURL,
+				AllowedMentions: &pingPerms,
 			})
 			if err != nil {
 				log.Println("discordgo:Session.WebhookExecute():", err)
+				dg.ChannelMessageSend(discordWatchChannel, chat.Author + ": " + chat.Content)
 			}
-			/*/
-			dg.ChannelMessageSend(discordWatchChannel, chat.Author + ": " + chat.Content)
-			//*/
 		case chat, ok := <-readDiscord:
 			if !ok {
 				shutdown()
