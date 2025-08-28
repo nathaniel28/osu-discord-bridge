@@ -103,6 +103,9 @@ func main() {
 			})
 			if err != nil {
 				log.Println("discordgo:Session.WebhookExecute():", err)
+				if len(chat.Author) > 0 && chat.Author[0] == '-' {
+					chat.Author = "\\" + chat.Author
+				}
 				dg.ChannelMessageSend(discordWatchChannel, chat.Author + ": " + chat.Content)
 			}
 		case chat, ok := <-readDiscord:
