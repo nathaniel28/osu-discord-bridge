@@ -118,16 +118,30 @@ func (c *OsuClient) writeLoop() {
 func (c *OsuClient) keepaliveLoop(cancel chan struct{}) {
 	notify := func(ch chan struct{}) {
 		// TODO: probably define the time somewhere more obvious
-		time.Sleep(90 * time.Second)
+		time.Sleep(120 * time.Second)
 		ch <- struct{}{}
 	}
-	nchan := make(chan struct{}, 1)
+
+	// TODO: determine root cause of issue, then remove this
+	var lastKeepalive time.Time
+
+	nchan := make(chan struct{})
 	go notify(nchan)
 	for {
 		select {
 		case <-cancel:
 			return
 		case <-nchan:
+			now := time.Now()
+			diff := now.Sub(lastKeepalive)
+			if diff < 100 * time.Second {
+				log.Println("odd timing, multiple notifiers active?")
+				time.Sleep(100 * time.Second - diff)
+				lastKeepalive = time.Now()
+			} else {
+				lastKeepalive = now
+			}
+
 			go notify(nchan)
 			resp, err := c.http.Do(c.keepalive)
 			if err != nil {
@@ -136,6 +150,7 @@ func (c *OsuClient) keepaliveLoop(cancel chan struct{}) {
 			}
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 				log.Println("dokeepalive odd status:", resp)
+				// TODO: try getting new token if 401
 			}
 			resp.Body.Close()
 		}
@@ -198,7 +213,7 @@ func (c *OsuClient) tryRecovery() error {
 	for i := 0; i < 12; i++ {
 		if wait > 90 * time.Second {
 			c.Read <- Message{
-				Content: fmt.Sprintf("sleeping for %v before attempting recovery", wait),
+				Content: fmt.Sprintf("sleeping for %v before attempting next recovery", wait),
 				Author: "(debug)",
 			}
 		}
