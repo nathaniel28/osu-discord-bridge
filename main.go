@@ -56,7 +56,7 @@ func main() {
 	}
 	readDiscord := make(chan string, 32)
 	dg.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
-		if m.ChannelID != discordWatchChannel || m.WebhookID == webhookID || m.Author.ID == s.State.User.ID {
+		if m.ChannelID != discordWatchChannel || m.WebhookID == webhookID || m.Author.ID == s.State.User.ID || len(m.Content) == 0 {
 			return
 		}
 		name := m.Author.GlobalName

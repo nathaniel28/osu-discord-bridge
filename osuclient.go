@@ -295,7 +295,7 @@ ready:
 			}
 			lo := min(len(msg.Messages), len(msg.Users))
 			for i := 0; i < lo; i++ {
-				if msg.Users[i].ID == c.botUserID || msg.Messages[i].ChannelID != c.watchChannelID {
+				if msg.Users[i].ID == c.botUserID || msg.Messages[i].ChannelID != c.watchChannelID || len(msg.Messages[i].Content) == 0 {
 					continue
 				}
 				c.Read <- Message{
