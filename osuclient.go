@@ -393,7 +393,11 @@ func (c *OsuClient) writeLoop() {
 
 func (c *OsuClient) readLoop() {
 	r := headerRequest{make(chan headerUpdate, 1), 0}
-	h := headerUpdate{}
+	c.updateHeaders <- r
+	h, ok := <-r.destination
+	if !ok {
+		return
+	}
 	var err error
 	c.ws, err = c.mkWebsocket(&h, &r)
 	if err != nil {
@@ -469,38 +473,7 @@ func (c *OsuClient) readLoop() {
 	}
 }
 
-// owned by readLoop, do not call elsewhere
-func (c *OsuClient) keepaliveLoop(cancel chan struct{}) {
-	doKeepalive := make(chan struct{}, 1)
-	notify := func() {
-		// TODO: probably define the time somewhere more obvious
-		time.Sleep(240 * time.Second)
-		doKeepalive <- struct{}{}
-	}
-	var lastKeepalive time.Time // for runtime sanity checks
-	go notify()
-	for {
-		select {
-		case <-cancel:
-			return
-		case <-doKeepalive:
-			now := time.Now()
-			diff := now.Sub(lastKeepalive)
-			if diff < 100 * time.Second {
-				log.Println("dangerous issue: odd timing, multiple notifiers active?")
-				time.Sleep(100 * time.Second - diff)
-				lastKeepalive = time.Now()
-			} else {
-				lastKeepalive = now
-			}
-			// this gets to bypass the ratelimit
-			c.Write <- Request{c.keepaliveReq, nil}
-			go notify()
-		}
-	}
-}
-
-var refreshNeeded = errors.New("current access token is outdated, try using refresh token to aquire a new one")
+var refreshNeeded = errors.New("current access token is outdated or otherwise invalid")
 var unreadyConnection = errors.New("ready event was not the first received")
 // mkWebsocket should only be called from readLoop
 func (c *OsuClient) mkWebsocket(h *headerUpdate, r *headerRequest) (*websocket.Conn, error) {
@@ -554,6 +527,37 @@ func (c *OsuClient) mkWebsocket(h *headerUpdate, r *headerRequest) (*websocket.C
 		return nil, fmt.Errorf("strangely, the response channel was closed")
 	}
 	return goodws, err
+}
+
+// owned by readLoop, do not call elsewhere
+func (c *OsuClient) keepaliveLoop(cancel chan struct{}) {
+	doKeepalive := make(chan struct{}, 1)
+	notify := func() {
+		// TODO: probably define the time somewhere more obvious
+		time.Sleep(240 * time.Second)
+		doKeepalive <- struct{}{}
+	}
+	var lastKeepalive time.Time // for runtime sanity checks
+	go notify()
+	for {
+		select {
+		case <-cancel:
+			return
+		case <-doKeepalive:
+			now := time.Now()
+			diff := now.Sub(lastKeepalive)
+			if diff < 100 * time.Second {
+				log.Println("dangerous issue: odd timing, multiple notifiers active?")
+				time.Sleep(100 * time.Second - diff)
+				lastKeepalive = time.Now()
+			} else {
+				lastKeepalive = now
+			}
+			// this gets to bypass the ratelimit
+			c.Write <- Request{c.keepaliveReq, nil}
+			go notify()
+		}
+	}
 }
 
 // if fn returned and error, it will try again (up to limit times)
