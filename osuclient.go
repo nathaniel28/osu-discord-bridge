@@ -5,15 +5,18 @@ import (
 	"errors"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
+// will be deserialized from content received over the websocket connection
 // tagged struct for reading part of the json osu sends over the websocket
 type osuMessage struct {
 	Content   string `json:"content"`
@@ -22,6 +25,7 @@ type osuMessage struct {
 	Action    bool   `json:"is_action"`
 }
 
+// will be deserialized from content received over the websocket connection
 // ditto to comment on osuMessage
 type osuUser struct {
 	Name      string `json:"username"`
@@ -29,265 +33,416 @@ type osuUser struct {
 	ID        int    `json:"id"`
 }
 
-// all the parts of the json this program cares about
+// will be deserialized from content received over the websocket connection
 type messageEvent struct {
 	Messages []osuMessage `json:"messages"`
 	Users    []osuUser    `json:"users"`
 }
 
+// will be deserialized from content received over the websocket connection
 type event struct {
 	Err       string          `json:"error"`
 	EventType string          `json:"event"`
 	Data      json.RawMessage `json:"data"`
 }
 
-// what we pass to the OsuClient.Read channel
+// acquired from <-OsuClient.Read
 type Message struct {
 	Content   string
 	Author    string
 	AvatarURL string
 }
 
+// send to OsuClient.Write <- to avoid ratelimiting
+// send to OsuClient.WriteRated <- to include it
+type Request struct {
+	// the request you want sent; nonnil
+	// don't set headers; they are set for you and yours will be overwritten
+	Http    *http.Request
+
+	// receipt may be nil (recall chans are reference types), but if it is
+	// not, it must be a channel with a buffer of size 1 or greater; this is
+	// to prevent readLoop from blocking
+	Receipt chan error
+}
+
+type headerUpdate struct {
+	headers http.Header
+	version uint64
+}
+
+type headerRequest struct {
+	destination chan headerUpdate
+	version     uint64
+}
+
 type OsuClient struct {
-	http      http.Client
-	websocket *websocket.Conn
-	headers   http.Header // includes authorization details
+	// NOTE: the following are safe for concurrent use
 
-	// watchOsu owns this request
-	// cannot be used from any other thread
-	keepalive *http.Request
+	http http.Client
 
-	// used in watchOsu
-	// cooldown used as is and as a start to exponential backoff
-	cooldown     time.Duration // should be set once during init
-	lastRecovery time.Time
+	// a user of this struct should use <-OsuClient.Read to get chat updates
+	// read as in past tense, not read
+	// consider SendChat if your goal is to get a string posted in chat
+	Read       chan Message
+	Write      chan Request
+	WriteRated chan Request
 
-	botUserID      int // essentially who to ignore
+	// set headerRequest.version to 0 if you have not gotten any headers
+	// yet, else set it to the version you most recently received
+	// set headerRequest.destination to the channel (with a buffer size of
+	// at least 1) you wish to receive your headerUpdate struct on
+	// if you aquire headers this way, you must not modify them as the same
+	// underlying map may be in use by multiple other threads
+	updateHeaders chan headerRequest
+
+	// used to prevent multiple Open()s or Close()s
+	running atomic.Bool
+
+	// NOTE: the following are unsafe for concurrent use
+
+	// owned by readLoop
+	ws *websocket.Conn // EXTRA_NOTE: ONLY ws.Close() is safe concurrently
+
+	// owned by headerDispenser
+	refresh    *http.Request
+	accessTok  string
+	refreshTok string
+
+	// NOTE: the following are constants; they are not set after
+	// NewOsuClient; therefore, they are safe for concurrent reads
+
+	keepaliveReq *http.Request
+
+	// starting point for exponential backoff, etc.
+	cooldown time.Duration
+
+	// botUserID is who to ignore when reading messages, since echo is not
+	// wanted; watchChannelID is the osu channel ID to read from
+	botUserID      int
 	watchChannelID int
 
-	chatEndpoint string
-
-	Read  chan Message // read messages from osu chat
-	Write chan string // consider Send() instead; this is not for messages
+	// see NewOsuClient for details
+	chatEndpoint   string
 }
 
-// NOTE: osu! says 10 messages/5 seconds for pms, #multiplayer, and #spectator,
-// but we are active in none of those, so without knowledge of the real rate
-// limit I've settled on 25 messages/10 seconds and hopefully that's close...
-// NOTE: Only two parts make continuous requests to the osu!api, this one and
-// the keepalive. This part is the only one partially controlled by users, so
-// I'm only rate limiting this one (why would you rate limit a keepalive anyway)
-func (c *OsuClient) writeLoop() {
-	var sentThisCycle int
-	var cycleEnd time.Time
-	for {
-		// yes, before actually reading c.Write
-		// it's less accurate but the channel can act as a buffer
-		// with no extra support
-		now := time.Now()
-		if now.After(cycleEnd) {
-			cycleEnd = now.Add(10 * time.Second)
-			sentThisCycle = 1
-		} else if sentThisCycle >= 25 {
-			time.Sleep(cycleEnd.Sub(now))
-		} else {
-			sentThisCycle++
-		}
-		msg, ok := <-c.Write
-		if !ok {
-			return
-		}
-		body := bytes.Buffer{}
-		body.WriteString(msg)
-		req, err := http.NewRequest("POST", c.chatEndpoint, &body)
-		if err != nil {
-			// TODO: that's fatal
-			continue
-		}
-		req.Header = c.headers
-		resp, err := c.http.Do(req)
-		if err != nil {
-			log.Println("send message request:", err.Error())
-			continue
-		}
-		resp.Body.Close()
+func NewOsuClient(uid, chid int, access, refresh string, cool time.Duration) *OsuClient {
+	keepalive, err := http.NewRequest("POST", "https://osu.ppy.sh/api/v2/chat/ack", nil)
+	if err != nil {
+		panic("NewOsuClient: failed to create keepalive *http.Request with http.NewRequest: " + err.Error())
+	}
+	refreshReq, err := http.NewRequest("POST", "https://osu.ppy.sh/oauth/token", nil)
+	if err != nil {
+		panic("NewOsuClient: failed to create refresh *http.Request with http.NewRequest: " + err.Error())
+	}
+	refreshReq.Header.Add("Accept", "application/json")
+	refreshReq.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+	return &OsuClient{
+		Read: make(chan Message, 32),
+		Write: make(chan Request, 32),
+		WriteRated: make(chan Request, 32),
+		updateHeaders: make(chan headerRequest, 4),
+		refresh: refreshReq,
+		accessTok: access,
+		refreshTok: refresh,
+		keepaliveReq: keepalive,
+		cooldown: cool,
+		botUserID: uid,
+		watchChannelID: chid,
+		chatEndpoint: fmt.Sprintf("https://osu.ppy.sh/api/v2/chat/channels/%v/messages", chid),
 	}
 }
 
-// managed by watchOsu; do not call elsewhere
-func (c *OsuClient) keepaliveLoop(cancel chan struct{}) {
-	notify := func(ch chan struct{}) {
-		// TODO: probably define the time somewhere more obvious
-		time.Sleep(120 * time.Second)
-		ch <- struct{}{}
+// WARNING: Open is NOT SAFE FOR CONCURRENT USE
+// This is because once open is called, the functions it starts as goroutines
+// are allowed to call Close, and Open and Close are not allowed to be called
+// concurrently
+var alreadyOpen = errors.New("OsuClient was open before this attempt")
+func (c *OsuClient) Open() error {
+	if !c.running.CompareAndSwap(false, true) {
+		return alreadyOpen
 	}
-
-	// TODO: determine root cause of issue, then remove this
-	var lastKeepalive time.Time
-
-	nchan := make(chan struct{})
-	go notify(nchan)
-	for {
-		select {
-		case <-cancel:
-			return
-		case <-nchan:
-			now := time.Now()
-			diff := now.Sub(lastKeepalive)
-			if diff < 100 * time.Second {
-				log.Println("odd timing, multiple notifiers active?")
-				time.Sleep(100 * time.Second - diff)
-				lastKeepalive = time.Now()
-			} else {
-				lastKeepalive = now
-			}
-
-			go notify(nchan)
-			resp, err := c.http.Do(c.keepalive)
-			if err != nil {
-				log.Println("dokeepalive:", err.Error())
-				continue
-			}
-			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				log.Println("dokeepalive odd status:", resp)
-				// TODO: try getting new token if 401
-			}
-			resp.Body.Close()
-		}
-	}
-}
-
-// can only be called by watchOsu; helper to watchOsu
-var unreadyConnection = errors.New("ready event was not the first received")
-func (c *OsuClient) initWebsocket() error {
-	if c.websocket != nil {
-		c.websocket.Close()
-	}
-	var err error
-	c.websocket, _, err = websocket.DefaultDialer.Dial("wss://notify.ppy.sh", c.headers)
-	if err != nil {
-		return err
-	}
-	err = c.websocket.WriteMessage(websocket.TextMessage, []byte(`{"event":"chat.start"}`))
-	if err != nil {
-		return err
-	}
-	_, raw, err := c.websocket.ReadMessage()
-	if err != nil {
-		return err
-	}
-	var ev event
-	err = json.Unmarshal(raw, &ev)
-	if err != nil {
-		return err
-	}
-	if ev.Err != "" {
-		return fmt.Errorf("error over osu websocket %v", ev.Err)
-	}
-	if ev.EventType != "connection.ready" {
-		return unreadyConnection
-	}
+	go c.headerDispenser()
+	go c.writeLoop()
+	go c.readLoop()
 	return nil
 }
 
-// helper to watchOsu
-var tooManyRetries = errors.New("after trying pretty hard to recover, it didn't work")
-func (c *OsuClient) tryRecovery() error {
-	defer func() {
-		c.lastRecovery = time.Now()
-	}()
-	elapsed := time.Since(c.lastRecovery)
-	if c.cooldown > elapsed {
-		time.Sleep(c.cooldown - elapsed)
+// WARNING: While Close is safe for concurrent use with other calls to Close,
+// it is NOT safe for concurrent use with calls to Open
+// WARNING: Once and OsuClient is closed, it must not be re-opened; instead,
+// create a new client with NewOsuClient
+// TODO, perhaps: make a client re-openable
+var alreadyClosed = errors.New("OsuClient was closed before this attempt")
+func (c *OsuClient) Close() error {
+	if !c.running.CompareAndSwap(true, false) {
+		return alreadyClosed
 	}
-	err := c.initWebsocket()
-	if err == nil {
-		return nil
-	}
-	log.Printf("initial recovery failed: %s", err.Error())
-	c.Read <- Message{
-		Content: "osu reader failed, attempting to recover",
-		Author: "(debug)",
-	}
-	wait := c.cooldown
-	for i := 0; i < 12; i++ {
-		if wait > 90 * time.Second {
-			c.Read <- Message{
-				Content: fmt.Sprintf("sleeping for %v before attempting next recovery", wait),
-				Author: "(debug)",
-			}
-		}
-		time.Sleep(wait)
-		err = c.initWebsocket()
-		if err == nil {
-			c.Read <- Message{
-				Content: "recovered successfully",
-				Author: "(debug)",
-			}
-			return nil
-		}
-		log.Println("failed recovery:", err.Error())
-		wait *= 2
-	}
-	return tooManyRetries
+	c.ws.Close()
+	// TODO: CRITICAL: can't close these channels, since this operation
+	// races with writes to the channel, and it is an error to send on a
+	// closed channel
+	// instead, make a shutdown channel to kill the writeloop?
+	// shutting things down is so complicated...
+	// but I'm gonna ignore it for now
+	close(c.updateHeaders)
+	close(c.Read)
+	close(c.Write)
+	return nil
 }
 
-func (c *OsuClient) watchOsu() {
-	for i := 0; i < 4; i++ {
-		err := c.initWebsocket()
-		if err == nil {
-			goto ready // sorry :P
-		}
-		log.Println("failed first websocket creation:", err.Error())
-		time.Sleep(c.cooldown)
+func (c *OsuClient) SendChat(msg string) {
+	// yes, check Write and not WriteRated...
+	if len(c.Write) >= cap(c.Write) / 2 + cap(c.Write) / 4 {
+		log.Println("dropping message, can't keep up")
+		return
 	}
-	// TODO: fatal
-	return
-ready:
-	cancelKeepalive := make(chan struct{})
-	go c.keepaliveLoop(cancelKeepalive)
-	var msg messageEvent
-	var ev event
-	log.Println("running watchOsu")
+	msg = `{"message":"` + escape(msg) + `","is_action":false}`
+	body := bytes.Buffer{}
+	body.WriteString(msg)
+	req, err := http.NewRequest("POST", c.chatEndpoint, &body)
+	if err != nil {
+		// TODO: that's fatal
+		log.Println("OsuClient.SendChat failed to construct request:", err)
+		return
+	}
+	// ...but be sure to send on WriteRated!
+	c.WriteRated <- Request{req, nil}
+}
+
+func escape(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case '\n':
+			b.WriteString("\\n")
+		case '\r':
+			b.WriteString("\\r")
+		case '\t':
+			b.WriteString("\\t")
+		case '"', '\\':
+			b.WriteByte('\\')
+			fallthrough
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+var noTokenFound = errors.New("access token or refresh token not found")
+func (c *OsuClient) headerDispenser() {
+	version := uint64(1)
+	headers := make(http.Header)
+	headers.Add("Authorization", "Bearer " + c.accessTok)
+	headers.Add("Accept", "application/json")
+	headers.Add("Content-Type", "application/json")
 	for {
-		_, raw, err := c.websocket.ReadMessage()
-		if err != nil {
-			cancelKeepalive <- struct{}{}
-			if !errors.Is(err, net.ErrClosed) {
-				err2 := c.tryRecovery()
-				if err2 == nil {
-					log.Println("recovered from websocket error:", err.Error())
-					go c.keepaliveLoop(cancelKeepalive)
-					continue
-				}
-				// TODO: that's fatal, report to main
-			}
+		hreq, ok := <-c.updateHeaders
+		if !ok {
+			log.Println("updateHeaders got closed, headerDispenser returning")
 			return
 		}
+		if hreq.version != version {
+			hreq.destination <- headerUpdate{headers, version}
+			continue
+		}
+		// they have the same version as us, and had a problem, so
+		// we need new headers
+		bbody := bytes.Buffer{}
+		bbody.WriteString("client_id=")
+		bbody.WriteString(oauth2ID)
+		bbody.WriteString("&client_secret=")
+		bbody.WriteString(oauth2Secret)
+		bbody.WriteString("&grant_type=refresh_token&refresh_token=")
+		bbody.WriteString(c.refreshTok)
+		body := bytes.NewReader(bbody.Bytes())
+		c.refresh.Body = io.NopCloser(body)
+		c.refresh.ContentLength = int64(body.Len())
+		// TODO: not setting c.refresh.GetBody, could this be a problem?
+		err := exponentialBackoff(c.cooldown, 3 * time.Second, 5, func() (bool, error) {
+			// the body may be reused, so rewind it
+			body.Seek(0, io.SeekStart)
+			// use c.http directly since writeLoop may be blocking
+			// for this thread to give them new headers
+			resp, err := c.http.Do(c.refresh)
+			// TODO: for fatal errors, get better handling
+			if err != nil {
+				ohNo := "OsuClient.headerDispenser: unimplemented fatal error handling: failed to make refresh request: " + err.Error()
+				log.Println(ohNo)
+				panic(ohNo)
+			}
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				ohNo := fmt.Sprintf("OsuClient.headerDispenser: unimplemented fatal error handling: non 2xx status: %v", resp.StatusCode)
+				log.Println(ohNo)
+				panic(ohNo)
+			}
+			var tok token
+			err = json.NewDecoder(resp.Body).Decode(&tok)
+			if err != nil {
+				return false, err
+			}
+			if len(tok.Access) == 0 || len(tok.Refresh) == 0 {
+				return false, noTokenFound
+			}
 
+			// must copy headers, since it may be in use by other
+			// threads
+			// TODO: is http.Header.Clone suitable?
+			replacement := make(http.Header)
+			for k, v := range headers {
+				replacement[k] = v
+			}
+			replacement.Set("Authorization", "Bearer " + tok.Access)
+			headers = replacement
+			version++
+			c.accessTok = tok.Access
+			c.refreshTok = tok.Refresh
+			return false, nil
+		})
+		if err != nil {
+
+			ohNo := "OsuClient.headerDispenser: unimplemented fatal error handling: failed to make refresh request: " + err.Error()
+			log.Println(ohNo)
+			panic(ohNo)
+		}
+		hreq.destination <- headerUpdate{headers, version}
+	}
+}
+
+// TODO: document how writeLoop (and readLoop) are shut down
+// don't call unless you're OsuClient.Open
+// only one must be running at once
+// NOTE: checking if certain channels are closed is a sanity check to prevent
+// an evil fast-spinning loop of doom
+func (c *OsuClient) writeLoop() {
+	r := headerRequest{make(chan headerUpdate, 1), 0}
+	c.updateHeaders <- r
+	h, ok := <-r.destination
+	if !ok {
+		return
+	}
+
+	// TODO: the messages/second is hardcoded, maybe change that?
+	go func() {
+		var sentThisCycle int
+		var cycleEnd time.Time
+		for {
+			now := time.Now()
+			if now.After(cycleEnd) {
+				cycleEnd = now.Add(10 * time.Second)
+				sentThisCycle = 1
+			} else if sentThisCycle >= 25 {
+				time.Sleep(cycleEnd.Sub(now))
+			} else {
+				sentThisCycle++
+			}
+			req, ok := <-c.WriteRated
+			if !ok {
+				log.Println("WriteRated got closed, no longer listening to it")
+				return
+			}
+			// TODO: can I get a use of closed channel here during
+			// a shutdown? better test it...
+			// for now, check c.running too
+			if !c.running.Load() {
+				log.Println("checking c.running is required in ratelimited loop")
+				return
+			}
+			c.Write <- req
+		}
+	}()
+
+	for {
+		req, ok := <-c.Write
+		if !ok {
+			// TODO: clean up goroutines this one owns
+			log.Println("Write go closed, no longer listening to it, writeLoop returning")
+			return
+		}
+	again:
+		req.Http.Header = h.headers
+		resp, err := c.http.Do(req.Http)
+		if err != nil {
+			if req.Receipt != nil {
+				req.Receipt <- err
+			}
+			log.Println("bad request", err)
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			if resp.StatusCode == 401 {
+				r.version = h.version
+				c.updateHeaders <- r
+				h, ok = <-r.destination
+				if !ok {
+					// TODO: clean up goroutines this one owns
+					return
+				}
+				goto again // sorry :P
+			} else {
+				log.Println("something is my fault", resp)
+			}
+		}
+		if req.Receipt != nil {
+			req.Receipt <- nil
+		}
+	}
+}
+
+func (c *OsuClient) readLoop() {
+	r := headerRequest{make(chan headerUpdate, 1), 0}
+	h := headerUpdate{}
+	var err error
+	c.ws, err = c.mkWebsocket(&h, &r)
+	if err != nil {
+		// TODO: fatal
+		log.Println("fatal during websocket creation:", err)
+		return
+	}
+
+	cancelKeepalive := make(chan struct{}, 1)
+	go c.keepaliveLoop(cancelKeepalive)
+
+	log.Println("started osu reader")
+	for {
+		_, raw, err := c.ws.ReadMessage()
+		if err != nil {
+			cancelKeepalive <- struct{}{}
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			c.ws, err = c.mkWebsocket(&h, &r)
+			if err != nil {
+				// TODO: fatal
+				log.Println("fatal during websocket recovery:", err)
+				return
+			}
+			go c.keepaliveLoop(cancelKeepalive)
+			continue
+		}
+		var ev event
 		err = json.Unmarshal(raw, &ev)
 		if err != nil {
-			log.Println("osu sent something strange and it could not be parsed:", err.Error())
-			cancelKeepalive <- struct{}{}
-			err = c.tryRecovery()
-			if err == nil {
-				continue
-			}
-			// TODO: fatal
-			return
+			log.Println("osu sent something that could not be parsed:", err)
+			continue
 		}
 		if ev.Err != "" {
 			log.Println("error while reading osu chat:", ev.Err)
 			cancelKeepalive <- struct{}{}
-			err = c.tryRecovery()
-			if err == nil {
-				continue
+			c.ws, err = c.mkWebsocket(&h, &r)
+			if err != nil {
+				// TODO: fatal
+				log.Println("fatal during websocket recovery:", err)
+				return
 			}
-			// TODO: fatal
-			return
+			go c.keepaliveLoop(cancelKeepalive)
+			continue
 		}
 		switch ev.EventType {
 		case "chat.message.new":
+			var msg messageEvent
 			err = json.Unmarshal(ev.Data, &msg)
 			if err != nil {
 				log.Println("could not parse as message:", err.Error())
@@ -312,70 +467,120 @@ ready:
 			log.Println("skipping unknown event type", ev.EventType)
 		}
 	}
-	// dead code currently
-	cancelKeepalive <- struct{}{}
 }
 
-func NewOsuClient(uid, chid int, authcode string, retryCooldown time.Duration) (*OsuClient, error) {
-	client := OsuClient{
-		headers: make(http.Header),
-		botUserID: uid,
-		watchChannelID: chid,
-		chatEndpoint: fmt.Sprintf("https://osu.ppy.sh/api/v2/chat/channels/%v/messages", chid),
-		cooldown: retryCooldown,
-		Read: make(chan Message, 32),
-		Write: make(chan string, 32),
+// owned by readLoop, do not call elsewhere
+func (c *OsuClient) keepaliveLoop(cancel chan struct{}) {
+	doKeepalive := make(chan struct{}, 1)
+	notify := func() {
+		// TODO: probably define the time somewhere more obvious
+		time.Sleep(240 * time.Second)
+		doKeepalive <- struct{}{}
 	}
-
-	var err error
-	client.keepalive, err = http.NewRequest("POST", "https://osu.ppy.sh/api/v2/chat/ack", nil)
-	if err != nil {
-		return nil, err
-	}
-	client.headers.Add("Authorization", "Bearer " + authcode)
-	client.headers.Add("Accept", "application/json")
-	client.headers.Add("Content-Type", "application/json")
-	client.keepalive.Header = client.headers
-
-	return &client, nil
-}
-
-func (c *OsuClient) Open() error {
-	go c.writeLoop()
-	go c.watchOsu()
-	return nil
-}
-
-func escape(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		switch r {
-		case '\n':
-			b.WriteString("\\n")
-		case '\r':
-			b.WriteString("\\r")
-		case '\t':
-			b.WriteString("\\t")
-		case '"', '\\':
-			b.WriteByte('\\')
-			fallthrough
-		default:
-			b.WriteRune(r)
+	var lastKeepalive time.Time // for runtime sanity checks
+	go notify()
+	for {
+		select {
+		case <-cancel:
+			return
+		case <-doKeepalive:
+			now := time.Now()
+			diff := now.Sub(lastKeepalive)
+			if diff < 100 * time.Second {
+				log.Println("dangerous issue: odd timing, multiple notifiers active?")
+				time.Sleep(100 * time.Second - diff)
+				lastKeepalive = time.Now()
+			} else {
+				lastKeepalive = now
+			}
+			// this gets to bypass the ratelimit
+			c.Write <- Request{c.keepaliveReq, nil}
+			go notify()
 		}
 	}
-	return b.String()
 }
 
-func (c *OsuClient) Send(msg string) {
-	if len(c.Write) == cap(c.Write) {
-		log.Println("dropping message, can't keep up")
-		return
+var refreshNeeded = errors.New("current access token is outdated, try using refresh token to aquire a new one")
+var unreadyConnection = errors.New("ready event was not the first received")
+// mkWebsocket should only be called from readLoop
+func (c *OsuClient) mkWebsocket(h *headerUpdate, r *headerRequest) (*websocket.Conn, error) {
+	var goodws *websocket.Conn
+	// TODO: lo is a hardcoded constant
+	err := exponentialBackoff(c.cooldown, 3 * time.Second, 12, func() (bool, error) {
+		ws, _, err := websocket.DefaultDialer.Dial("wss://notify.ppy.sh", h.headers)
+		if err != nil {
+			return false, err
+		}
+		err = ws.WriteMessage(websocket.TextMessage, []byte(`{"event":"chat.start"}`))
+		if err != nil {
+			ws.Close()
+			return false, err
+		}
+		_, raw, err := ws.ReadMessage()
+		if err != nil {
+			ws.Close()
+			return false, err
+		}
+		var ev event
+		err = json.Unmarshal(raw, &ev)
+		if err != nil {
+			ws.Close()
+			return false, err
+		}
+		if ev.Err != "" {
+			ws.Close()
+			if ev.Err == "authentication failed" {
+				r.version = h.version
+				c.updateHeaders <- *r
+				var ok bool
+				*h, ok = <-r.destination
+				if !ok {
+					goodws = nil
+					// would burn the errors otherwise
+					return false, nil
+				}
+				return true, refreshNeeded
+			}
+			return false, fmt.Errorf("error over osu websocket %v", ev.Err)
+		}
+		if ev.EventType != "connection.ready" {
+			ws.Close()
+			return false, unreadyConnection
+		}
+		goodws = ws
+		return false, nil
+	})
+	if goodws == nil {
+		return nil, fmt.Errorf("strangely, the response channel was closed")
 	}
-	c.Write <- `{"message":"` + escape(msg) + `","is_action":false}`
+	return goodws, err
 }
 
-func (c *OsuClient) Close() {
-	close(c.Read)
-	close(c.Write)
-	c.websocket.Close()
+// if fn returned and error, it will try again (up to limit times)
+// between tries, sleep for t seconds
+// if fn returned true, sleep lo this cycle and do not increment the count
+// if limit is reached, return the most recent error
+// TODO: maybe make a nonblocking version? (if failed and sleep time is more
+// than a second, start a goroutine to do it?)
+func exponentialBackoff(t, lo time.Duration, limit int, fn func() (bool, error)) error {
+	var err error
+	j := 2 * limit
+	for i := 0; i < limit; {
+		var skip bool
+		skip, err = fn()
+		if err == nil {
+			return nil
+		}
+		log.Println("backing off due to", err)
+		if skip && j > 0 {
+			j--
+			log.Println("backoff sleeping shortly this time")
+			time.Sleep(lo)
+			continue
+		}
+		time.Sleep(t)
+		t *= 2
+		i++
+	}
+	return err
 }

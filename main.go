@@ -44,10 +44,7 @@ func main() {
 		log.Fatal("acquiring code:", err)
 	}
 
-	osuClient, err := NewOsuClient(osuBotID, osuWatchChannel, token.Token, 15 * time.Second)
-	if err != nil {
-		log.Fatal("osu client struct creation:", err)
-	}
+	osuClient := NewOsuClient(osuBotID, osuWatchChannel, token.Access, token.Refresh, 15 * time.Second)
 
 	// discord setup
 	dg, err := discordgo.New("Bot " + discordToken)
@@ -112,7 +109,7 @@ func main() {
 			if !ok {
 				shutdown()
 			}
-			osuClient.Send(chat)
+			osuClient.SendChat(chat)
 		}
 	}
 }

@@ -35,7 +35,7 @@ func (h handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type token struct {
-	Token   string `json:"access_token"`
+	Access  string `json:"access_token"`
 	Refresh string `json:"refresh_token"`
 	Expires int    `json:"expires_in"`
 }
