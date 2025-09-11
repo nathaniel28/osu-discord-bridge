@@ -526,10 +526,10 @@ func (c *OsuClient) mkWebsocket(h *headerUpdate, r *headerRequest) (*websocket.C
 				c.updateHeaders <- *r
 				var ok bool
 				*h, ok = <-r.destination
+				// sanity check
 				if !ok {
+					log.Println("actually how though")
 					goodws = nil
-					// would burn the errors otherwise
-					// TODO: do something better
 					return false, nil
 				}
 				return true, refreshNeeded
@@ -543,9 +543,8 @@ func (c *OsuClient) mkWebsocket(h *headerUpdate, r *headerRequest) (*websocket.C
 		goodws = ws
 		return false, nil
 	})
-	if goodws == nil {
-		// TODO: any other way to return early? better change this
-		return nil, fmt.Errorf("strangely, the response channel was closed")
+	if err == nil && goodws == nil {
+		return nil, fmt.Errorf("failed to make a suitable websocket")
 	}
 	return goodws, err
 }
@@ -553,7 +552,7 @@ func (c *OsuClient) mkWebsocket(h *headerUpdate, r *headerRequest) (*websocket.C
 // owned by readLoop, do not call elsewhere
 func (c *OsuClient) keepaliveLoop(cancel chan struct{}) {
 	// TODO: probably define the interval somewhere more obvious
-	keepaliveInterval := 240 * time.Second
+	keepaliveInterval := 600 * time.Second
 	doKeepalive := make(chan struct{}, 1)
 	notify := func() {
 		time.Sleep(keepaliveInterval)
