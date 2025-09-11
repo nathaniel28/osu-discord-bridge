@@ -83,6 +83,7 @@ type OsuClient struct {
 
 	// a user of this struct should use <-OsuClient.Read to get chat updates
 	// furthermore, users must never close any channel they have access to
+	// however, users should be prepared for Read to close at any time
 	// read as in past tense, not read
 	// consider SendChat if your goal is to get a string posted in chat
 	Read       chan Message
@@ -317,6 +318,9 @@ func (c *OsuClient) headerDispenser() {
 // only one must be running at once
 // NOTE: checking if certain channels are closed is a sanity check to prevent
 // an evil fast-spinning loop of doom
+// TODO: should somehow clear Write and WriteRated channels before shutting
+// down, because users of this struct or maybe SendChat could be blocking on
+// them
 func (c *OsuClient) writeLoop() {
 	r := headerRequest{make(chan headerUpdate, 1), 0}
 	c.updateHeaders <- r
@@ -419,6 +423,8 @@ func (c *OsuClient) readLoop() {
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
+			log.Println("readLoop websocket down:", err)
+			c.ws.Close()
 			c.ws, err = c.mkWebsocket(&h, &r)
 			if err != nil {
 				// TODO: fatal
@@ -437,6 +443,7 @@ func (c *OsuClient) readLoop() {
 		if ev.Err != "" {
 			log.Println("error while reading osu chat:", ev.Err)
 			cancelKeepalive <- struct{}{}
+			c.ws.Close()
 			c.ws, err = c.mkWebsocket(&h, &r)
 			if err != nil {
 				// TODO: fatal
