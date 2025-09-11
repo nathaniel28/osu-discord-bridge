@@ -56,7 +56,7 @@ type Message struct {
 // send to OsuClient.Write <- to avoid ratelimiting
 // send to OsuClient.WriteRated <- to include it
 type Request struct {
-	// the request you want sent; nonnil
+	// the request you want sent; must be nonnil
 	// don't set headers; they are set for you and yours will be overwritten
 	Http    *http.Request
 
@@ -182,16 +182,9 @@ func (c *OsuClient) Close() error {
 	if !c.running.CompareAndSwap(true, false) {
 		return alreadyClosed
 	}
-	c.ws.Close()
-	// TODO: CRITICAL: can't close these channels, since this operation
-	// races with writes to the channel, and it is an error to send on a
-	// closed channel
-	// instead, make a shutdown channel to kill the writeloop?
-	// shutting things down is so complicated...
-	// but I'm gonna ignore it for now
-	close(c.updateHeaders)
-	close(c.Read)
-	close(c.Write)
+	c.ws.Close() // tells readLoop to shutdown
+	c.Write <- Request{nil, nil} // tell writeLoop to shutdown
+	c.updateHeaders <- headerRequest{nil, 0} // tell headerDispenser to shutdown
 	return nil
 }
 
@@ -246,6 +239,10 @@ func (c *OsuClient) headerDispenser() {
 		hreq, ok := <-c.updateHeaders
 		if !ok {
 			log.Println("updateHeaders got closed, headerDispenser returning")
+			return
+		}
+		if hreq.destination == nil {
+			log.Println("shutting down headerDispenser")
 			return
 		}
 		if hreq.version != version {
@@ -315,7 +312,6 @@ func (c *OsuClient) headerDispenser() {
 	}
 }
 
-// TODO: document how writeLoop (and readLoop) are shut down
 // don't call unless you're OsuClient.Open
 // only one must be running at once
 // NOTE: checking if certain channels are closed is a sanity check to prevent
@@ -331,7 +327,6 @@ func (c *OsuClient) writeLoop() {
 		return
 	}
 
-	// NOTE: this anon function's thread is shutdown by closing WriteRated
 	// TODO: the messages/second is hardcoded, maybe change that?
 	go func() {
 		var sentThisCycle int
@@ -347,8 +342,9 @@ func (c *OsuClient) writeLoop() {
 				sentThisCycle++
 			}
 			req, ok := <-c.WriteRated
+			// sanity check
 			if !ok {
-				log.Println("shutdown ratelimited relay")
+				log.Println("WriteRated got closed, anonymous rated loop returning")
 				return
 			}
 			// TODO: can I get a use of closed channel here during
@@ -361,12 +357,19 @@ func (c *OsuClient) writeLoop() {
 			c.Write <- req
 		}
 	}()
-	defer close(c.WriteRated)
+	// TODO: can't close channel because it may have writers
+	// TODO: the above function needs to close when this function does
+	// (currently it just will block forever)
+	//defer close(c.WriteRated)
 
 	for {
 		req, ok := <-c.Write
 		if !ok {
 			log.Println("Write go closed, no longer listening to it, writeLoop returning")
+			return
+		}
+		if req.Http == nil {
+			log.Println("shutting down writeLoop")
 			return
 		}
 	again:
@@ -385,6 +388,7 @@ func (c *OsuClient) writeLoop() {
 				r.version = h.version
 				c.updateHeaders <- r
 				h, ok = <-r.destination
+				// sanity check
 				if !ok {
 					log.Println("but how?!")
 					return
@@ -424,6 +428,7 @@ func (c *OsuClient) readLoop() {
 		if err != nil {
 			cancelKeepalive <- struct{}{}
 			if errors.Is(err, net.ErrClosed) {
+				log.Println("shutting down readLoop")
 				return
 			}
 			log.Println("readLoop websocket down:", err)
@@ -559,6 +564,7 @@ func (c *OsuClient) keepaliveLoop(cancel chan struct{}) {
 	for {
 		select {
 		case <-cancel:
+			log.Println("shutting down keepaliveLoop")
 			return
 		case <-doKeepalive:
 			now := time.Now()

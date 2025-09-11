@@ -77,6 +77,7 @@ func main() {
 	shutdown := func() {
 		osuClient.Close()
 		dg.Close()
+		time.Sleep(1 * time.Second) // hack to let any logging finish
 		log.Println("done shutdown")
 		os.Exit(0)
 	}
