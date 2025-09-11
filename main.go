@@ -63,8 +63,7 @@ func main() {
 		readDiscord <- fmt.Sprintf("%s: %s", name, m.Content)
 	})
 	dg.Identify.Intents = discordgo.IntentsGuildMessages
-	err = dg.Open()
-	if err != nil {
+	if err := dg.Open(); err != nil {
 		log.Fatal("discordgo:Session.Open():", err)
 	}
 

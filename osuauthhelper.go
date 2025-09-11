@@ -56,6 +56,7 @@ func osuAuthorize() (token token, err error) {
 		err = server.ListenAndServe()
 	}
 	if err != http.ErrServerClosed {
+		fmt.Println("code getting server failed:", err)
 		return
 	}
 	code := <-handler.code

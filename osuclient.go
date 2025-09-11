@@ -82,6 +82,7 @@ type OsuClient struct {
 	http http.Client
 
 	// a user of this struct should use <-OsuClient.Read to get chat updates
+	// furthermore, users must never close any channel they have access to
 	// read as in past tense, not read
 	// consider SendChat if your goal is to get a string posted in chat
 	Read       chan Message
@@ -123,7 +124,7 @@ type OsuClient struct {
 	watchChannelID int
 
 	// see NewOsuClient for details
-	chatEndpoint   string
+	chatEndpoint string
 }
 
 func NewOsuClient(uid, chid int, access, refresh string, cool time.Duration) *OsuClient {
@@ -197,9 +198,10 @@ func (c *OsuClient) SendChat(msg string) {
 		log.Println("dropping message, can't keep up")
 		return
 	}
-	msg = `{"message":"` + escape(msg) + `","is_action":false}`
 	body := bytes.Buffer{}
-	body.WriteString(msg)
+	body.WriteString(`{"message":"`)
+	body.WriteString(escape(msg))
+	body.WriteString(`","is_action":false}`)
 	req, err := http.NewRequest("POST", c.chatEndpoint, &body)
 	if err != nil {
 		// TODO: that's fatal
@@ -449,7 +451,7 @@ func (c *OsuClient) readLoop() {
 			var msg messageEvent
 			err = json.Unmarshal(ev.Data, &msg)
 			if err != nil {
-				log.Println("could not parse as message:", err.Error())
+				log.Println("could not parse as message:", err)
 				continue
 			}
 			lo := min(len(msg.Messages), len(msg.Users))
@@ -502,6 +504,8 @@ func (c *OsuClient) mkWebsocket(h *headerUpdate, r *headerRequest) (*websocket.C
 		}
 		if ev.Err != "" {
 			ws.Close()
+			// TODO: should it try getting new headers even if the
+			// error is not authentication failed?
 			if ev.Err == "authentication failed" {
 				r.version = h.version
 				c.updateHeaders <- *r
@@ -510,6 +514,7 @@ func (c *OsuClient) mkWebsocket(h *headerUpdate, r *headerRequest) (*websocket.C
 				if !ok {
 					goodws = nil
 					// would burn the errors otherwise
+					// TODO: do something better
 					return false, nil
 				}
 				return true, refreshNeeded
@@ -524,6 +529,7 @@ func (c *OsuClient) mkWebsocket(h *headerUpdate, r *headerRequest) (*websocket.C
 		return false, nil
 	})
 	if goodws == nil {
+		// TODO: any other way to return early? better change this
 		return nil, fmt.Errorf("strangely, the response channel was closed")
 	}
 	return goodws, err
@@ -531,10 +537,11 @@ func (c *OsuClient) mkWebsocket(h *headerUpdate, r *headerRequest) (*websocket.C
 
 // owned by readLoop, do not call elsewhere
 func (c *OsuClient) keepaliveLoop(cancel chan struct{}) {
+	// TODO: probably define the interval somewhere more obvious
+	keepaliveInterval := 240 * time.Second
 	doKeepalive := make(chan struct{}, 1)
 	notify := func() {
-		// TODO: probably define the time somewhere more obvious
-		time.Sleep(240 * time.Second)
+		time.Sleep(keepaliveInterval)
 		doKeepalive <- struct{}{}
 	}
 	var lastKeepalive time.Time // for runtime sanity checks
@@ -546,9 +553,12 @@ func (c *OsuClient) keepaliveLoop(cancel chan struct{}) {
 		case <-doKeepalive:
 			now := time.Now()
 			diff := now.Sub(lastKeepalive)
-			if diff < 100 * time.Second {
+			t := keepaliveInterval - 30 * time.Second
+			if diff < t {
 				log.Println("dangerous issue: odd timing, multiple notifiers active?")
-				time.Sleep(100 * time.Second - diff)
+				// guard against somehow a second
+				// go notify() in this thread
+				time.Sleep(t - diff)
 				lastKeepalive = time.Now()
 			} else {
 				lastKeepalive = now
