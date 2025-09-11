@@ -72,6 +72,7 @@ type headerUpdate struct {
 }
 
 type headerRequest struct {
+	// destination should never be closed
 	destination chan headerUpdate
 	version     uint64
 }
@@ -86,6 +87,7 @@ type OsuClient struct {
 	// however, users should be prepared for Read to close at any time
 	// read as in past tense, not read
 	// consider SendChat if your goal is to get a string posted in chat
+	// to prevent race conditions WriteRated may only be closed by WriteLoop
 	Read       chan Message
 	Write      chan Request
 	WriteRated chan Request
@@ -329,6 +331,7 @@ func (c *OsuClient) writeLoop() {
 		return
 	}
 
+	// NOTE: this anon function's thread is shutdown by closing WriteRated
 	// TODO: the messages/second is hardcoded, maybe change that?
 	go func() {
 		var sentThisCycle int
@@ -345,7 +348,7 @@ func (c *OsuClient) writeLoop() {
 			}
 			req, ok := <-c.WriteRated
 			if !ok {
-				log.Println("WriteRated got closed, no longer listening to it")
+				log.Println("shutdown ratelimited relay")
 				return
 			}
 			// TODO: can I get a use of closed channel here during
@@ -358,11 +361,11 @@ func (c *OsuClient) writeLoop() {
 			c.Write <- req
 		}
 	}()
+	defer close(c.WriteRated)
 
 	for {
 		req, ok := <-c.Write
 		if !ok {
-			// TODO: clean up goroutines this one owns
 			log.Println("Write go closed, no longer listening to it, writeLoop returning")
 			return
 		}
@@ -383,7 +386,7 @@ func (c *OsuClient) writeLoop() {
 				c.updateHeaders <- r
 				h, ok = <-r.destination
 				if !ok {
-					// TODO: clean up goroutines this one owns
+					log.Println("but how?!")
 					return
 				}
 				goto again // sorry :P
