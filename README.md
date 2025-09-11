@@ -31,3 +31,7 @@ To compile, run `go build`; this will automatically fetch dependencies you don't
 ### execution
 
 `./bridge`, then copy the link it prints and resolve it in your web browser of choice. Authorize your osu! account to be used. I'm just as disappointed as you for needing to do this overly complicated authentication, although if you had a true bot account you probably wouldn't need to.
+
+### with regards to the license
+
+See LICENSE, the contents of which pretain to all files matching `*.go`.
