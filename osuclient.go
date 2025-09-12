@@ -246,6 +246,7 @@ func (c *OsuClient) headerDispenser() {
 			return
 		}
 		if hreq.version != version {
+			log.Println("distributing headers")
 			hreq.destination <- headerUpdate{headers, version}
 			continue
 		}
@@ -270,14 +271,11 @@ func (c *OsuClient) headerDispenser() {
 			resp, err := c.http.Do(c.refresh)
 			// TODO: for fatal errors, get better handling
 			if err != nil {
-				ohNo := "OsuClient.headerDispenser: unimplemented fatal error handling: failed to make refresh request: " + err.Error()
-				log.Println(ohNo)
-				panic(ohNo)
+				return false, err
 			}
+			defer resp.Body.Close()
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				ohNo := fmt.Sprintf("OsuClient.headerDispenser: unimplemented fatal error handling: non 2xx status: %v", resp.StatusCode)
-				log.Println(ohNo)
-				panic(ohNo)
+				return false, fmt.Errorf("failed to aquire new headers: %+v", resp)
 			}
 			var tok token
 			err = json.NewDecoder(resp.Body).Decode(&tok)
@@ -308,6 +306,7 @@ func (c *OsuClient) headerDispenser() {
 			log.Println(ohNo)
 			panic(ohNo)
 		}
+		log.Println("distributing new headers")
 		hreq.destination <- headerUpdate{headers, version}
 	}
 }
@@ -563,7 +562,6 @@ func (c *OsuClient) keepaliveLoop(cancel chan struct{}) {
 	for {
 		select {
 		case <-cancel:
-			log.Println("shutting down keepaliveLoop")
 			return
 		case <-doKeepalive:
 			now := time.Now()
