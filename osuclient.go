@@ -160,7 +160,7 @@ func NewOsuClient(uid, chid int, access, refresh string, cool time.Duration) *Os
 // WARNING: Open is NOT SAFE FOR CONCURRENT USE
 // This is because once open is called, the functions it starts as goroutines
 // are allowed to call Close, and Open and Close are not allowed to be called
-// concurrently
+// concurrently, but why one would want thread safety here is beyond me
 var alreadyOpen = errors.New("OsuClient was open before this attempt")
 func (c *OsuClient) Open() error {
 	if !c.running.CompareAndSwap(false, true) {
@@ -185,6 +185,10 @@ func (c *OsuClient) Close() error {
 	c.ws.Close() // tells readLoop to shutdown
 	c.Write <- Request{nil, nil} // tell writeLoop to shutdown
 	c.updateHeaders <- headerRequest{nil, 0} // tell headerDispenser to shutdown
+	// TODO: close(c.Read) to tell those blocking on it it's gone
+	// THIS ACTION MUST BE DONE AFTER readLoop HAS BEEN SHUTDOWN
+	// readloop makes writes on this channel,
+	// so some syncronization is needed
 	return nil
 }
 
@@ -394,7 +398,7 @@ func (c *OsuClient) writeLoop() {
 				}
 				goto again // sorry :P
 			} else {
-				log.Println("something is my fault", resp)
+				log.Println("something is my fault", req, resp)
 			}
 		}
 		if req.Receipt != nil {
