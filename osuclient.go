@@ -398,7 +398,7 @@ func (c *OsuClient) writeLoop() {
 				}
 				goto again // sorry :P
 			} else {
-				log.Println("something is my fault", req, resp)
+				log.Println("something is my fault", req.Http, resp)
 			}
 		}
 		if req.Receipt != nil {
