@@ -1,17 +1,19 @@
 package main
 
 import (
-	"log"
-	"sync"
+	"sync/atomic"
 
 	"golang.org/x/sys/unix"
 )
 
 type CircularLog struct {
-	buf  []byte
-	Log  *log.Logger
-	lock sync.Mutex
-	pos  int
+	// memory mapped log buffer
+	buf []byte
+
+	// next place to write
+	// may be greater than len(buf), so always take pos % len(buf)
+	//pos atomic.Uint32
+	pos atomic.Uint64
 }
 
 func (cl *CircularLog) Open(path string, size int) (err error) {
@@ -26,28 +28,16 @@ func (cl *CircularLog) Open(path string, size int) (err error) {
 	}
 	cl.buf, err = unix.Mmap(fd, 0, size, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
 	unix.Close(fd)
-	if err == nil {
-		cl.Log = log.New(cl, "", log.Ldate|log.Ltime)
-	}
 	return
 }
 
 func (cl *CircularLog) Write(p []byte) (n int, err error) {
-	// TODO: use a fancier locking mechanism that only blocks if the part of
-	// the buffer you want to write to is in use?
-	cl.lock.Lock()
 	n = len(p)
-	if n > len(cl.buf) {
-		n = len(cl.buf)
-		p = p[:n]
+	from := (cl.pos.Add(uint64(n)) - uint64(n)) % uint64(len(cl.buf))
+	w := copy(cl.buf[from:], p)
+	if w < n {
+		copy(cl.buf, p[w:])
 	}
-	w := copy(cl.buf[cl.pos:], p)
-	if w == len(p) {
-		cl.pos += w
-	} else {
-		cl.pos = copy(cl.buf, p[w:])
-	}
-	cl.lock.Unlock()
 	return
 }
 
@@ -57,7 +47,6 @@ func (cl *CircularLog) Close() (err error) {
 	}
 	err = unix.Munmap(cl.buf)
 	if err == nil {
-		cl.Log = nil
 		cl.buf = nil
 	}
 	return

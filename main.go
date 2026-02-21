@@ -103,13 +103,21 @@ func main() {
 				if len(chat.Author) > 0 && chat.Author[0] == '-' {
 					chat.Author = "\\" + chat.Author
 				}
-				dg.ChannelMessageSend(discordWatchChannel, chat.Author + ": " + chat.Content)
+				_, err := dg.ChannelMessageSend(discordWatchChannel, chat.Author + ": " + chat.Content)
+				if err != nil {
+					log.Println("discordgo:Session.ChannelMessageSend():", err)
+				} else {
+					log.Println("msg dst: discord (fallback)")
+				}
+			} else {
+				log.Println("msg dst: discord")
 			}
 		case chat, ok := <-readDiscord:
 			if !ok {
 				shutdown()
 			}
 			osuClient.SendChat(chat)
+			log.Println("msg dst: osu")
 		}
 	}
 }
